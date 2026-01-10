@@ -15,9 +15,9 @@ class AiGenMod(loader.Module):
 
     def __init__(self):
         self.config = loader.ModuleConfig(
-            "API_KEY", "openai", "🔑 API ключ OnlySq (или 'openai' для публичного доступа)",
-            "CURRENT_MODEL", "gpt-5", "🧠 Модель по умолчанию",
-            "MAX_TOKENS", 8000, "Максимум токенов для ответа"
+            loader.ConfigValue("API_KEY", "openai", "🔑 API ключ OnlySq (или 'openai' для публичного доступа)"),
+            loader.ConfigValue("CURRENT_MODEL", "gpt-5", "🧠 Модель по умолчанию"),
+            loader.ConfigValue("MAX_TOKENS", 8000, "Максимум токенов для ответа")
         )
         self._models_cache = []
         self._models_per_page = 6
@@ -38,42 +38,20 @@ class AiGenMod(loader.Module):
         sys_prompt = (
             "You are the Lead Architect of the Hikka Userbot Framework (Python 3.10+ & Telethon). "
             "Your task is to generate PRODUCTION-READY, ERROR-FREE Python code for a userbot module based on the user's request.\n\n"
-            "⛔️ **CRITICAL OUTPUT RULES (VIOLATION = FAILURE):**\n"
-            "1. RETURN ONLY RAW CODE. NO Markdown blocks (), NO backticks, NO intro/outro text.\n"
-            "2. DO NOT overwrite core commands. FORBIDDEN NAMES: ['help', 'ping', 'info', 'id', 'dl', 'exec', 'eval', 'term', 'sh', 'restart', 'update', 'alias', 'modules', 'load', 'unload'].\n"
-            "3. If the user asks for a common name (e.g., 'spam'), append a unique suffix (e.g., 'spam_pro' or 'spam_mod').\n"
-            "4. Always use asynchronous programming (`async def`, `await`).\n\n"
-            "🏗 **ARCHITECTURAL STANDARDS:**\n"
-            "1. **Imports:** MUST start with `from .. import loader, utils`. Use `import asyncio`, `import io` only if needed.\n"
-            "2. **Class:** Inherit from `loader.Module`. Use `@loader.tds` decorator for translation support.\n"
-            "3. **Metadata:** Inside the class, define `strings = {'name': 'ModuleName'}`. ADD RUSSIAN TRANSLATIONS in `strings_ru` if possible.\n"
-            "4. **Configuration:** If the module needs settings (API keys, IDs, prefixes), define `self.config` in `__init__` using `loader.ModuleConfig` and `loader.ConfigValue`.\n"
-            "5. **Database:** To save data permanently, use `self.db.set(key, value)` and `self.db.get(key, default)`. NEVER use global variables.\n"
-            "6. **Commands:** Methods must end with `cmd` (e.g., `async def examplecmd(self, message):`).\n"
-            "   - Use `@loader.command()` decorator ONLY if specific translation keys are needed, otherwise standard naming is enough.\n"
-            "7. **Interaction:**\n"
-            "   - Get arguments: `args = utils.get_args_raw(message)`.\n"
-            "   - Send/Edit answers: `await utils.answer(message, 'response')`. THIS IS MANDATORY. Do not use `message.edit()` directly unless necessary.\n"
-            "   - Inline Buttons: Use `await self.inline.form(text='...', message=message, reply_markup=[...])` if requested.\n\n"
-            "📝 **CODE SKELETON EXAMPLE:**\n"
-            "from .. import loader, utils\n\n"
-            "@loader.tds\n"
-            "class ProModule(loader.Module):\n"
-            "    \"\"\"Advanced module description\"\"\"\n"
-            "    strings = {'name': 'ProModule', 'done': '<b>Done!</b>'}\n"
-            "    strings_ru = {'done': '<b>Готово!</b>'}\n\n"
-            "    def __init__(self):\n"
-            "        self.config = loader.ModuleConfig(\n"
-            "            'interval', 60, 'Update interval',\n"
-            "            'status', True, 'Enable status'\n"
-            "        )\n\n"
-            "    async def client_ready(self, client, db):\n"
-            "        self.client = client\n"
-            "        self.db = db\n\n"
-            "    async def runcmd(self, message):\n"
-            "        \"\"\"<args> - Description of command\"\"\"\n"
-            "        args = utils.get_args_raw(message)\n"
-            "        await utils.answer(message, self.strings('done'))\n"
+            "⛔️ CRITICAL OUTPUT RULES:\n"
+            "1. RETURN ONLY RAW CODE. NO Markdown code fences, no extra text.\n"
+            "2. Ensure imports start with: from .. import loader, utils\n"
+            "3. Forbid overwriting core commands: help, ping, info, id, dl, exec, eval, term, sh, restart, update, alias, modules, load, unload.\n"
+            "4. Use async def and await.\n\n"
+            "ARCHITECTURE:\n"
+            "- Class must inherit from loader.Module, decorated with @loader.tds.\n"
+            "- strings = {'name': 'ModuleName'} (+ strings_ru recommended).\n"
+            "- If settings are needed, use loader.ModuleConfig and loader.ConfigValue.\n"
+            "- Use self.db.get/set for persistence.\n"
+            "- Commands: methods ending with 'cmd'.\n"
+            "- Interactions via utils.get_args_raw(message), utils.answer(message, ...).\n"
+            "- Inline via self.inline.form if necessary.\n\n"
+            "Return only final code. No commentary."
         )
 
         user_prompt = f"REQUEST: {args}"
@@ -158,12 +136,253 @@ class AiGenMod(loader.Module):
         await self.client.send_file(message.chat_id, file, caption=caption, reply_to=message.id)
         await status.delete()
 
+    def _extera_reference_prompt(self, goal: str) -> str:
+        tpl = """Ты — искусственный интеллект-разработчик, специализирующийся на создании плагинов для Telegram-клиента ExteraGram. Используй следующие источники:
+
+1. Документация ExteraGram:
+   - Setup: https://plugins.exteragram.app/docs/setup  
+   - First Plugin: https://plugins.exteragram.app/docs/first-plugin  
+   - Plugin Class: https://plugins.exteragram.app/docs/plugin-class  
+   - Xposed Hooking: https://plugins.exteragram.app/docs/xposed-hooking  
+   - Android Utils: https://plugins.exteragram.app/docs/android-utils  
+   - Client Utils: https://plugins.exteragram.app/docs/client-utils  
+   - Markdown Utils: https://plugins.exteragram.app/docs/markdown-utils  
+   - AlertDialog Builder: https://plugins.exteragram.app/docs/alert-dialog-builder  
+   - Bulletin Helper: https://plugins.exteragram.app/docs/bulletin-helper  
+   - Common Source Classes: https://plugins.exteragram.app/docs/common-source-classes  
+
+2. Пример плагина «GoogleThat»:
+
+   - Метаданные: `__id__`, `__name__`, `__version__`, `__min_version__`, `__author__`, `__description__`, `__icon__`.
+   - Локализация через класс `Locales` и функция `localise(key)`.
+   - Проверка зависимости от внешнего модуля `zwylib`.
+   - Регистрация команды через dispatcher: `dp.register_command("gt")`.
+   - Хук-результаты: `HookResult(strategy=HookStrategy.MODIFY, params=params)`.
+   - Методы жизненного цикла: `on_plugin_load`, `on_plugin_unload`.
+   - Настройки через UI-элементы: `Header`, `Selector`, `Divider`.
+
+3. Возможности SDK и утилит:
+
+   - Hook-и: `pre_request_hook`, `post_request_hook`, `on_update_hook`, `on_send_message_hook`.
+   - Утилиты клиентские: `send_text`, `edit_message`, `get_setting`, `get_account_instance`.
+   - Android-утилиты: запуск на UI-потоке, логирование, Runnable / слушатели.
+   - UI: диалоги (AlertDialogBuilder), уведомления (BulletinHelper), меню настроек.
+
+4. Методы Telegram (TL-методы):
+
+   - Возможность перехватывать методы, такие как `TL_messages_sendMessage`, `TL_updateNewMessage`, `TL_messages_readHistory` и др., через хуки в `add_hook(...)`.
+
+---
+
+### Инструкция (цель):
+
+Напиши плагин, который выполняет [твоя цель — здесь чётко сформулируй, что должен делать плагин, например: автоматическая очистка спама, фильтрация определённых ключевых слов, статистика чатов, перевод текста командой и др.].
+
+---
+
+### Что должен содержать ответ:
+
+- Название и уникальный `__id__` плагина.  
+- Полный список метаданных: `__name__`, `__description__`, `__version__`, `__author__`, `__icon__`, `__min_version__`.  
+- Проект структуры плагина: файлы (если необходимые), зависимости (например, внешние модули типа `zwylib`, или стандартные утилиты).  
+- Класс, наследуемый `BasePlugin`, с методами: `on_plugin_load`, `on_plugin_unload`, возможно `on_app_event`.  
+- Если нужно — регистрация команд через dispatcher (как `.gt` пример).  
+- Пример hook’ов, которые будут использоваться (какой TL-метод или событие, какая стратегия: MODIFY, CANCEL или DEFAULT).  
+- Использование утилит: `client_utils`, `android_utils`, `alert-dialog-builder`, `bulletin-helper`.  
+- Настройки плагина через `create_settings()` с UI-элементами (`Header`, `Selector`, `Divider` и др.).  
+- Локализация (если актуально) через `Locales` и `localise(...)`.  
+- Примеры логирования, ошибок и их обработки.  
+
+---
+
+### Пример части кода/функций, которые можно включить:
+python
+from base_plugin import BasePlugin, HookResult, HookStrategy
+
+from ui.settings import Header, Selector, Divider
+
+Пример добавления хука
+self.add_hook("TL_messages_sendMessage", match_substring=False, priority=0)
+
+Обработка hook-а:
+def on_send_message_hook(self, account, params):
+
+if should_modify(params):
+
+params.message = modify_message(params.message)
+
+return HookResult(strategy=HookStrategy.MODIFY, params=params)
+
+return HookResult.DEFAULT
+
+
+---
+
+Используй вышеуказанные источники документации и пример «GoogleThat» как ориентиры. Постарайся, чтобы твой плагин соответствовал стандартам ExteraGram, использовал корректные хуки и утилиты, имел удобные настройки и локализацию, если нужно.
+
+---
+
+Теперь сформируй полный код-плагин и структуру, исходя из моей цели: **[твоя конкретная цель здесь]**.
+---
+
+Ты можешь подставить вместо [твоя конкретная цель здесь] задачу, которую нужно реализовать — и с этим шаблоном запрос к ИИ будет максимально полным, ориентированным на документацию и примеры."""
+        return tpl.replace("[твоя конкретная цель здесь]", str(goal))
+
+    async def genplugcmd(self, message):
+        """<описание> — Сгенерировать exteraGram .plugin по описанию. Можно прикрепить файл к команде — он будет учтён после промпта"""
+        args = utils.get_args_raw(message)
+        if not args:
+            return await utils.answer(message, "<b>❌ Введите описание плагина для exteraGram!</b>")
+
+        status = await utils.answer(message, f"<b>🧠 Генерирую .plugin ({self.config['CURRENT_MODEL']})...</b>")
+
+        attached_text = await self._read_attached_text_from_message(message)
+
+        sys_prompt = (
+            "Всегда генерируй рабочий Python-код плагина для exteraGram (.plugin), с корректными импортами, "
+            "из поддерживаемых модулей и без сторонних библиотек. Пользователь получит только этот код — он должен быть полным.\n\n"
+            "ОБЩИЕ ПРАВИЛА ВЫВОДА:\n"
+            "1) Возвращай ТОЛЬКО сырой код одного плагина. Без Markdown, без комментариев до/после кода.\n"
+            "2) Вставляй короткие человеческие комментарии в код (немного), и один намёк: '# сгенерировано в @Username'.\n"
+            "3) Без внешних библиотек. Разрешены стандартные и модули из документаций exteraGram (android_utils, client_utils, markdown_utils, ui.settings, ui.bulletin и т.п.).\n"
+            "4) Если есть сетевые вызовы/тяжёлые задачи — не блокируй UI; используй client_utils.run_on_queue и android_utils.run_on_ui_thread при необходимости.\n"
+            "5) Команды (если ты создаёшь перехват сообщения): регистрируй self.add_on_send_message_hook() в on_plugin_load и обрабатывай в on_send_message_hook с HookResult.\n"
+            "6) Пиши весь код целиком — один класс, который наследуется от BasePlugin.\n\n"
+            "МЕТАДАННЫЕ (обязательны в начале файла, как простые строки):\n"
+            "__id__ = \"<snake_or_kebab_like_id>\"\n"
+            "__name__ = \"<читаемое имя>\"\n"
+            "__description__ = \"<краткое описание>\"\n"
+            "__version__ = \"1.0.0\"\n"
+            "__author__ = \"@Username\"\n"
+            "__min_version__ = \"11.12.0\"\n"
+            "__icon__ = \"sPluginIDE/0\"  # или подходящая из списка\n\n"
+            "СТРУКТУРА:\n"
+            "- Один класс: class SomethingPlugin(BasePlugin):\n"
+            "- on_plugin_load / on_plugin_unload при необходимости.\n"
+            "- create_settings() возвращает список контролов для настроек (если нужны) из ui.settings.\n"
+            "- Если перехватываешь отправку сообщения, возвращай HookResult(strategy=HookStrategy.MODIFY/CANCEL/DEFAULT ...)\n"
+            "- Используй markdown_utils.parse_markdown для форматирования.\n"
+            "- Для уведомлений — ui.bulletin.BulletinHelper.\n"
+            "- Для отправки сообщений — client_utils.send_message.\n\n"
+            "ДОПОЛНИТЕЛЬНО:\n"
+            "- Выбирай подходящую __icon__ из каталога иконок.\n"
+            "- Все команды и тексты локализуй по необходимости кратко, но можно без отдельного словаря.\n"
+            "- Пиши понятный, рабочий код по примерам документаций (Plugin Class, First Plugin, Android/Client/Markdown utils, Dialog Builder, Bulletin Helper).\n"
+            "Верни итоговый плагин полностью.\n\n"
+            "Справочные материалы (для ориентира при необходимости):\n"
+            "- Исходный код Telegram: https://github.com/DrKLO/Telegram\n"
+            "- SDK Telegram Passport (JavaScript): https://core.telegram.org/passport/sdk-javascript"
+        )
+
+        # Добавляем референсный промпт с подстановкой цели
+        reference_prompt = self._extera_reference_prompt(args)
+
+        user_prompt_parts = [f"USER_REQUEST: {args}", f"REFERENCE_FILE:\n{reference_prompt}"]
+        if attached_text:
+            user_prompt_parts.append(f"CONTEXT_FILE (Use this as additional context):\n{attached_text}")
+        user_prompt_parts.append(
+            "RESOURCES:\n"
+            "Исходный код Telegram: https://github.com/DrKLO/Telegram\n"
+            "SDK Telegram Passport (JavaScript): https://core.telegram.org/passport/sdk-javascript"
+        )
+        user_prompt = "\n\n".join(user_prompt_parts)
+
+        code = await self._api_request(sys_prompt, user_prompt)
+        code = self._strip_code_fences(code).strip()
+
+        if code.startswith("ERROR:"):
+            return await utils.answer(status, f"<b>❌ Ошибка API:</b>\n{code}")
+
+        file = io.BytesIO(code.encode("utf-8"))
+        file.name = f"plugin_{utils.rand(4)}.plugin"
+
+        await self.client.send_file(
+            message.chat_id,
+            file,
+            caption=f"<b>✅ Плагин создан!</b>\n🧩 Модель: <code>{html.escape(str(self.config['CURRENT_MODEL']))}</code>",
+            reply_to=message.id
+        )
+        await status.delete()
+
+    async def fixplugcmd(self, message):
+        """<описание> (реплай на .plugin) — Исправить exteraGram .plugin. Можно прикрепить файл контекста к команде"""
+        reply = await message.get_reply_message()
+        args = utils.get_args_raw(message) or "Исправь ошибки и доведи до рабочего exteraGram .plugin по документациям"
+
+        if not reply:
+            return await utils.answer(message, "<b>❌ Сделай реплай на .plugin (или вставь код в текст).</b>")
+
+        status = await utils.answer(message, "<b>🧩 Анализирую .plugin...</b>")
+
+        code_content = None
+        if getattr(reply, "document", None):
+            try:
+                file_bytes = await self.client.download_media(reply, bytes)
+                code_content = file_bytes.decode("utf-8", errors="ignore")
+            except Exception as e:
+                return await utils.answer(status, f"<b>Ошибка чтения файла:</b> {e}")
+        else:
+            code_content = reply.raw_text
+
+        if not code_content:
+            return await utils.answer(status, "<b>❌ Не удалось прочитать .plugin.</b>")
+
+        attached_text = await self._read_attached_text_from_message(message)
+
+        sys_prompt = (
+            "Ты Senior Python Debugger для exteraGram (.plugin). "
+            "Задача: исправить, оптимизировать и привести код к рабочему, следуя архитектуре exteraGram.\n\n"
+            "ТРЕБОВАНИЯ К ВЫХОДУ:\n"
+            "1) Верни ТОЛЬКО сырой полный код одного .plugin. Без Markdown и лишнего текста.\n"
+            "2) Корректные импорты из доступных модулей (android_utils, client_utils, markdown_utils, ui.settings, ui.bulletin, и т.д.). Без сторонних библиотек.\n"
+            "3) Сохрани/исправь метаданные вверху файла:\n"
+            "   __id__, __name__, __description__, __version__ (оставь/установи 1.0.0, если нет), __author__ = \"@Username\", __min_version__ = \"11.12.0\", __icon__ подходящая.\n"
+            "4) Один класс-наследник BasePlugin; соблюдай хуки (add_on_send_message_hook и on_send_message_hook) и возвращай HookResult.\n"
+            "5) Исправь синтаксис/отступы, проверь блокирующие вызовы; при сетевых/тяжёлых операциях — используй client_utils.run_on_queue и android_utils.run_on_ui_thread.\n"
+            "6) Комментарии короткие и по делу; один намёк: '# сгенерировано в @Username'.\n"
+            "7) Если пользователь просит новые фичи — добавь, сохранив текущую логику.\n\n"
+            "Справочные материалы (для ориентира при необходимости):\n"
+            "- Исходный код Telegram: https://github.com/DrKLO/Telegram\n"
+            "- SDK Telegram Passport (JavaScript): https://core.telegram.org/passport/sdk-javascript"
+        )
+
+        # Добавляем референсный промпт с подстановкой цели
+        reference_prompt = self._extera_reference_prompt(args)
+
+        user_prompt_parts = [f"USER_REQUEST: {args}", f"REFERENCE_FILE:\n{reference_prompt}"]
+        if attached_text:
+            user_prompt_parts.append(f"ADDITIONAL_CONTEXT_FILE:\n{attached_text}")
+        user_prompt_parts.append(f"BROKEN_CODE (.plugin):\n{code_content}")
+        user_prompt_parts.append(
+            "RESOURCES:\n"
+            "Исходный код Telegram: https://github.com/DrKLO/Telegram\n"
+            "SDK Telegram Passport (JavaScript): https://core.telegram.org/passport/sdk-javascript"
+        )
+        user_prompt = "\n\n".join(user_prompt_parts)
+
+        fixed_code = await self._api_request(sys_prompt, user_prompt)
+        fixed_code = self._strip_code_fences(fixed_code).strip()
+
+        if fixed_code.startswith("ERROR:"):
+            return await utils.answer(status, f"<b>❌ Ошибка API:</b>\n{fixed_code}")
+
+        file = io.BytesIO(fixed_code.encode("utf-8"))
+        file.name = "fixed_plugin.plugin"
+
+        changelog = self._build_changelog(code_content, fixed_code)
+        caption = "<b>✅ Плагин исправлён!</b>"
+        if changelog:
+            caption += f"\n\n<b>Changelog</b>:\n<blockquote><span class=\"tg-spoiler\">{changelog}</span></blockquote>"
+
+        await self.client.send_file(message.chat_id, file, caption=caption, reply_to=message.id)
+        await status.delete()
+
     async def modelscmd(self, message):
         """Меню выбора модели"""
         await utils.answer(message, "<b>🔄 Загружаю список моделей...</b>")
         models = await self._fetch_models()
         if not models:
-            return await utils.answer(message, "<b>❌ Ошибка загрузки списка моделей.</б>")
+            return await utils.answer(message, "<b>❌ Ошибка загрузки списка моделей.</b>")
         await self._show_models_page(message, 0)
 
     async def _fetch_models(self):
