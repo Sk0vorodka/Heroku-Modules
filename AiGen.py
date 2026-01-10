@@ -16,7 +16,7 @@ class AiGenMod(loader.Module):
     def __init__(self):
         self.config = loader.ModuleConfig(
             "API_KEY", "openai", "🔑 API ключ OnlySq (или 'openai' для публичного доступа)",
-            "CURRENT_MODEL", "google/gemini-2.0-flash-exp:free", "🧠 Модель по умолчанию",
+            "CURRENT_MODEL", "gpt-5", "🧠 Модель по умолчанию",
             "MAX_TOKENS", 8000, "Максимум токенов для ответа"
         )
         self._models_cache = []
@@ -163,7 +163,7 @@ class AiGenMod(loader.Module):
         await utils.answer(message, "<b>🔄 Загружаю список моделей...</b>")
         models = await self._fetch_models()
         if not models:
-            return await utils.answer(message, "<b>❌ Ошибка загрузки списка моделей.</b>")
+            return await utils.answer(message, "<b>❌ Ошибка загрузки списка моделей.</б>")
         await self._show_models_page(message, 0)
 
     async def _fetch_models(self):
@@ -385,10 +385,7 @@ class AiGenMod(loader.Module):
         return text
 
     def _clean_code(self, text):
-        text = re.sub(r"^\s*", "", text)
-        text = re.sub(r"^\s*", "", text)
-        text = re.sub(r"$", "", text)
-        return text.strip()
+        return str(text).strip()
 
     async def _read_attached_text_from_message(self, message):
         try:
