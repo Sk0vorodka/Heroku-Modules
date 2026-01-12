@@ -1,3 +1,8 @@
+# meta developer: @Sk0lovek - @Sk0lovek_plugins
+# scope: hikka_only
+# meta name: AIGen
+# meta version: 1.0.0
+
 import aiohttp
 import io
 import re
