@@ -29,6 +29,7 @@ MaxToTgForwarder — модуль для юзербота Maxli (https://github.
   .tgfwdinfo  — показать текущие настройки
 """
 
+import asyncio
 import logging
 
 import aiohttp
@@ -38,6 +39,16 @@ from maxli import loader, utils
 logger = logging.getLogger(__name__)
 
 TELEGRAM_API_URL = "https://api.telegram.org/bot{token}/sendMessage"
+
+# Для socks5-прокси нужен пакет aiohttp_socks (pip install aiohttp_socks).
+# Если его нет — просто останется недоступна поддержка socks5, http(s)-прокси
+# работает и без него через встроенный параметр aiohttp `proxy=`.
+try:
+    from aiohttp_socks import ProxyConnector
+
+    _HAS_SOCKS = True
+except ImportError:
+    _HAS_SOCKS = False
 
 
 @loader.tds
@@ -96,11 +107,67 @@ class MaxToTgForwarderMod(loader.Module):
                 lambda: "Включена ли пересылка",
                 validator=loader.validators.Boolean(),
             ),
+            loader.ConfigValue(
+                "proxy_url",
+                "",
+                lambda: (
+                    "Прокси для доступа к Telegram API, если он заблокирован напрямую "
+                    "(если Telegram недоступен с этого сервера/телефона). "
+                    "Примеры: http://127.0.0.1:8080, "
+                    "socks5://user:pass@1.2.3.4:1080 (нужен пакет aiohttp_socks). "
+                    "Оставить пустым, если прямое подключение работает"
+                ),
+                validator=loader.validators.String(),
+            ),
+            loader.ConfigValue(
+                "timeout",
+                20,
+                lambda: "Таймаут запроса к Telegram API в секундах",
+                validator=loader.validators.Integer(),
+            ),
+            loader.ConfigValue(
+                "retries",
+                2,
+                lambda: "Сколько раз повторить отправку при ошибке сети (0 — без повторов)",
+                validator=loader.validators.Integer(),
+            ),
         )
         self._session: aiohttp.ClientSession | None = None
+        self._session_proxy_url: str | None = None
+
+    async def _make_session(self) -> aiohttp.ClientSession:
+        proxy_url = self.config["proxy_url"].strip()
+
+        if proxy_url.startswith("socks5://") or proxy_url.startswith("socks4://"):
+            if not _HAS_SOCKS:
+                logger.error(
+                    "MaxToTgForwarder: указан socks-прокси, но пакет aiohttp_socks "
+                    "не установлен. Выполните: pip install aiohttp_socks"
+                )
+                return aiohttp.ClientSession()
+            connector = ProxyConnector.from_url(proxy_url)
+            return aiohttp.ClientSession(connector=connector)
+
+        # http(s)-прокси не требует отдельного коннектора, передаётся в post(proxy=...)
+        return aiohttp.ClientSession()
+
+    async def _get_session(self) -> aiohttp.ClientSession:
+        proxy_url = self.config["proxy_url"].strip()
+        needs_new = (
+            self._session is None
+            or self._session.closed
+            or proxy_url != self._session_proxy_url
+        )
+        if needs_new:
+            if self._session and not self._session.closed:
+                await self._session.close()
+            self._session = await self._make_session()
+            self._session_proxy_url = proxy_url
+        return self._session
 
     async def client_ready(self):
-        self._session = aiohttp.ClientSession()
+        self._session = await self._make_session()
+        self._session_proxy_url = self.config["proxy_url"].strip()
 
     async def on_unload(self):
         if self._session and not self._session.closed:
@@ -135,22 +202,52 @@ class MaxToTgForwarderMod(loader.Module):
             payload["message_thread_id"] = thread_id
 
         url = TELEGRAM_API_URL.format(token=token)
+        timeout = aiohttp.ClientTimeout(total=self.config["timeout"] or 20)
 
-        try:
-            if self._session is None or self._session.closed:
-                self._session = aiohttp.ClientSession()
+        proxy_url = self.config["proxy_url"].strip()
+        # http(s)-прокси передаём напрямую в post(); socks5 уже "зашит" в коннекторе сессии
+        http_proxy = proxy_url if proxy_url.startswith("http") else None
 
-            timeout = aiohttp.ClientTimeout(total=15)
-            async with self._session.post(url, json=payload, timeout=timeout) as resp:
-                data = await resp.json(content_type=None)
-                if resp.status != 200 or not data.get("ok"):
-                    error = data.get("description", str(data))
-                    logger.error("MaxToTgForwarder: ошибка Telegram API: %s", error)
-                    return False, error
-                return True, None
-        except Exception as exc:  # noqa: BLE001
-            logger.exception("MaxToTgForwarder: исключение при отправке в Telegram")
-            return False, str(exc)
+        retries = max(0, self.config["retries"])
+        last_error = "неизвестная ошибка"
+
+        for attempt in range(retries + 1):
+            try:
+                session = await self._get_session()
+                async with session.post(
+                    url,
+                    json=payload,
+                    timeout=timeout,
+                    proxy=http_proxy,
+                ) as resp:
+                    data = await resp.json(content_type=None)
+                    if resp.status != 200 or not data.get("ok"):
+                        error = data.get("description", str(data))
+                        logger.error("MaxToTgForwarder: ошибка Telegram API: %s", error)
+                        return False, error
+                    return True, None
+
+            except (asyncio.TimeoutError, TimeoutError):
+                last_error = (
+                    "не удалось подключиться к api.telegram.org (таймаут). "
+                    "Возможно, Telegram заблокирован в этой сети — задайте proxy_url "
+                    "(.config MaxToTgForwarder proxy_url http://... или socks5://...)"
+                )
+            except aiohttp.ClientConnectorError as exc:
+                last_error = (
+                    f"не удалось подключиться к api.telegram.org: {exc}. "
+                    "Проверьте интернет/DNS или задайте proxy_url"
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.exception("MaxToTgForwarder: исключение при отправке в Telegram")
+                last_error = str(exc)
+                break  # неизвестная ошибка — повторять смысла нет
+
+            if attempt < retries:
+                await asyncio.sleep(1.5 * (attempt + 1))
+
+        logger.error("MaxToTgForwarder: %s", last_error)
+        return False, last_error
 
     @loader.watcher("no_commands", "in")
     async def watcher(self, message):
@@ -216,7 +313,9 @@ class MaxToTgForwarderMod(loader.Module):
             f"чат MAX (source_chat_id): {cfg['source_chat_id'] or 'не задан'}\n"
             f"чат Telegram (target_chat_id): {cfg['target_chat_id'] or 'не задан'}\n"
             f"ветка (thread_id): {cfg['thread_id'] or 'нет'}\n"
-            f"токен бота: {'задан' if cfg['bot_token'] else 'не задан'}"
+            f"токен бота: {'задан' if cfg['bot_token'] else 'не задан'}\n"
+            f"прокси: {cfg['proxy_url'] or 'не используется'}\n"
+            f"таймаут: {cfg['timeout']}с, повторов: {cfg['retries']}"
         )
         await utils.answer(
             message,
