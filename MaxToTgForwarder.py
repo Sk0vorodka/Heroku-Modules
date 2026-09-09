@@ -114,8 +114,20 @@ class MaxToTgForwarderMod(loader.Module):
                 "thread_id",
                 0,
                 lambda: (
-                    "ID ветки (топика) в Telegram-группе с форумом. "
+                    "ID ветки (топика) в Telegram-группе с форумом для ВСЕХ "
+                    "сообщений, кроме одиночных фото (см. single_photo_thread_id). "
                     "0 — отправлять в общий чат без ветки"
+                ),
+                validator=loader.validators.Integer(),
+            ),
+            loader.ConfigValue(
+                "single_photo_thread_id",
+                0,
+                lambda: (
+                    "ID ветки (топика) в Telegram для сообщений, содержащих "
+                    "РОВНО одну фотографию и больше ничего (ни текста-вложений, "
+                    "ни доп. фото/видео/файлов). Всё остальное идёт в обычную "
+                    "ветку thread_id. 0 — не выделять такие сообщения отдельно"
                 ),
                 validator=loader.validators.Integer(),
             ),
@@ -291,6 +303,18 @@ class MaxToTgForwarderMod(loader.Module):
             return "document"
         return "document"
 
+    def _pick_thread_id(self, attaches) -> int:
+        """Ровно одно фото и больше ничего -> single_photo_thread_id.
+        Всё остальное (без фото, несколько вложений, видео/файлы/гс и т.д.)
+        -> обычный thread_id."""
+        single_photo_thread = self.config["single_photo_thread_id"]
+
+        if single_photo_thread and len(attaches) == 1:
+            if self._classify_attachment(attaches[0]) == "photo":
+                return single_photo_thread
+
+        return self.config["thread_id"]
+
     @staticmethod
     def _extract_attachment_url(att):
         candidates = []
@@ -334,6 +358,57 @@ class MaxToTgForwarderMod(loader.Module):
                 pass
 
         return candidates[0] if candidates else None
+
+    def _get_effective_content(self, message):
+        """Возвращает (text, attaches, original_sender) для сообщения.
+
+        Если сообщение переслано или является ответом, полезная нагрузка
+        (текст/вложения) в API Max по официальной схеме лежит не в самом
+        сообщении, а во вложенном linked_message (с типом forward/reply),
+        и уже внутри него — в поле message. Точное имя этого атрибута в
+        PyMax нигде явно не задокументировано, поэтому перебираем несколько
+        вероятных вариантов.
+        """
+        text = getattr(message, "text", None) or ""
+        attaches = (
+            getattr(message, "attaches", None)
+            or getattr(message, "attachments", None)
+            or []
+        )
+
+        if text or attaches:
+            return text, attaches, None
+
+        for link_attr in (
+            "linked_message",
+            "link",
+            "forward",
+            "forwarded_message",
+            "forward_message",
+            "reply",
+            "reply_to",
+        ):
+            linked = getattr(message, link_attr, None)
+            if linked is None:
+                continue
+
+            original_sender = getattr(linked, "sender", None)
+
+            # Полезная нагрузка может лежать прямо в linked, либо ещё на
+            # уровень глубже в linked.message (как в официальной схеме)
+            for candidate in (getattr(linked, "message", None), linked):
+                if candidate is None:
+                    continue
+                c_text = getattr(candidate, "text", None) or ""
+                c_attaches = (
+                    getattr(candidate, "attaches", None)
+                    or getattr(candidate, "attachments", None)
+                    or []
+                )
+                if c_text or c_attaches:
+                    return c_text, c_attaches, original_sender
+
+        return text, attaches, None
 
     # ------------------------------------------------------------------ #
     # Имя отправителя
@@ -418,10 +493,8 @@ class MaxToTgForwarderMod(loader.Module):
 
         return None
 
-    async def _resolve_sender_name(self, message) -> str:
-        sender = getattr(message, "sender", None)
-
-        # Готовое непустое строковое имя (не просто цифры) — используем как есть
+    async def _resolve_name(self, sender) -> str:
+        """Резолвит имя по значению sender (int ID, строка или объект)."""
         if isinstance(sender, str) and not sender.strip().isdigit():
             return sender
 
@@ -431,12 +504,6 @@ class MaxToTgForwarderMod(loader.Module):
             if name:
                 return name
             user_id = getattr(sender, "id", None) or getattr(sender, "user_id", None)
-
-        # Иногда готовое имя может лежать прямо в самом сообщении
-        for attr in ("sender_name", "from_name", "author_name", "user_name"):
-            val = getattr(message, attr, None)
-            if val:
-                return str(val)
 
         if user_id is None:
             return "MAX"
@@ -453,6 +520,17 @@ class MaxToTgForwarderMod(loader.Module):
             return name
 
         return str(user_id)
+
+    async def _resolve_sender_name(self, message) -> str:
+        sender = getattr(message, "sender", None)
+
+        # Иногда готовое имя может лежать прямо в самом сообщении
+        for attr in ("sender_name", "from_name", "author_name", "user_name"):
+            val = getattr(message, attr, None)
+            if val:
+                return str(val)
+
+        return await self._resolve_name(sender)
 
     # ------------------------------------------------------------------ #
     # Telegram API
@@ -530,14 +608,15 @@ class MaxToTgForwarderMod(loader.Module):
         logger.error("MaxToTgForwarder: %s", last_error)
         return False, last_error
 
-    async def _send_text_message(self, html_text: str):
+    async def _send_text_message(self, html_text: str, thread_id: int | None = None):
         payload = {
             "chat_id": self.config["target_chat_id"],
             "text": html_text,
             "parse_mode": "HTML",
             "disable_web_page_preview": True,
         }
-        thread_id = self.config["thread_id"]
+        if thread_id is None:
+            thread_id = self.config["thread_id"]
         if thread_id:
             payload["message_thread_id"] = thread_id
         return await self._tg_call("sendMessage", payload)
@@ -555,7 +634,7 @@ class MaxToTgForwarderMod(loader.Module):
     # Пересылка вложений
     # ------------------------------------------------------------------ #
 
-    async def _forward_attachment(self, att, sender: str, text: str):
+    async def _forward_attachment(self, att, sender: str, text: str, thread_id: int = 0):
         kind = self._classify_attachment(att)
         url = self._extract_attachment_url(att)
         caption = self._format_text(sender, text, limit=900) if text else f"<b>{sender}</b>"
@@ -570,7 +649,7 @@ class MaxToTgForwarderMod(loader.Module):
                 f"{caption}\n\n📎 <i>вложение ({self._escape_html(kind)}), "
                 "не удалось получить ссылку на файл</i>"
             )
-            await self._send_text_message(note)
+            await self._send_text_message(note, thread_id=thread_id)
             return
 
         try:
@@ -581,7 +660,7 @@ class MaxToTgForwarderMod(loader.Module):
                 f"{caption}\n\n📎 <i>не удалось загрузить вложение: "
                 f"{self._escape_html(str(exc))}</i>"
             )
-            await self._send_text_message(note)
+            await self._send_text_message(note, thread_id=thread_id)
             return
 
         filename = url.split("/")[-1].split("?")[0] or f"{kind}.bin"
@@ -598,7 +677,6 @@ class MaxToTgForwarderMod(loader.Module):
         method, field = MEDIA_METHOD_MAP.get(kind, ("sendDocument", "document"))
 
         payload = {"chat_id": self.config["target_chat_id"]}
-        thread_id = self.config["thread_id"]
         if thread_id:
             payload["message_thread_id"] = thread_id
 
@@ -655,7 +733,7 @@ class MaxToTgForwarderMod(loader.Module):
                 f"{caption}\n\n📎 <i>не удалось переслать вложение "
                 f"({self._escape_html(kind)}): {self._escape_html(str(error))}</i>"
             )
-            await self._send_text_message(note)
+            await self._send_text_message(note, thread_id=thread_id)
 
     # ------------------------------------------------------------------ #
     # Watcher
@@ -678,23 +756,25 @@ class MaxToTgForwarderMod(loader.Module):
         if not same_chat:
             return
 
-        text = message.text or ""
-        attaches = (
-            getattr(message, "attaches", None)
-            or getattr(message, "attachments", None)
-            or []
-        )
+        text, attaches, original_sender = self._get_effective_content(message)
 
         if not text and not attaches:
             return
 
         sender_name = await self._resolve_sender_name(message)
+
+        if original_sender is not None:
+            orig_name = await self._resolve_name(original_sender)
+            sender_name = f"{sender_name} ↪️ {orig_name}"
+
         sender = self._escape_html(sender_name)
+
+        thread_id = self._pick_thread_id(attaches)
 
         if attaches and self.config["forward_media"]:
             for att in attaches:
                 try:
-                    await self._forward_attachment(att, sender, text)
+                    await self._forward_attachment(att, sender, text, thread_id=thread_id)
                 except Exception:  # noqa: BLE001
                     logger.exception(
                         "MaxToTgForwarder: необработанная ошибка при пересылке вложения: %r",
@@ -706,7 +786,7 @@ class MaxToTgForwarderMod(loader.Module):
             text = text or "[вложение, пересылка медиа выключена]"
 
         formatted = self._format_text(sender, text, limit=3500)
-        ok, error = await self._send_text_message(formatted)
+        ok, error = await self._send_text_message(formatted, thread_id=thread_id)
         if not ok:
             logger.error("MaxToTgForwarder: не удалось переслать сообщение: %s", error)
 
@@ -749,6 +829,19 @@ class MaxToTgForwarderMod(loader.Module):
 
         sender = getattr(target, "sender", None)
         lines.append(f"sender: type={type(sender).__name__}, value={sender!r}")
+
+        for link_attr in (
+            "linked_message",
+            "link",
+            "forward",
+            "forwarded_message",
+            "forward_message",
+            "reply",
+            "reply_to",
+        ):
+            linked = getattr(target, link_attr, None)
+            if linked is not None:
+                lines.append(f"\nнайден атрибут '{link_attr}': {linked!r}"[:1000])
 
         attaches = (
             getattr(target, "attaches", None)
@@ -799,6 +892,8 @@ class MaxToTgForwarderMod(loader.Module):
             f"чат MAX (source_chat_id): {cfg['source_chat_id'] or 'не задан'}\n"
             f"чат Telegram (target_chat_id): {cfg['target_chat_id'] or 'не задан'}\n"
             f"ветка (thread_id): {cfg['thread_id'] or 'нет'}\n"
+            f"ветка для одиночных фото (single_photo_thread_id): "
+            f"{cfg['single_photo_thread_id'] or 'не задана'}\n"
             f"токен бота: {'задан' if cfg['bot_token'] else 'не задан'}\n"
             f"прокси: {cfg['proxy_url'] or 'не используется'}\n"
             f"таймаут: {cfg['timeout']}с, повторов: {cfg['retries']}"
