@@ -6,27 +6,42 @@
 """
 MaxToTgForwarder — модуль для юзербота Maxli (https://github.com/YouRooni/Maxli)
 
-Слушает выбранный чат в MAX и пересылает новые сообщения в Telegram
-через Bot API (метод sendMessage), в конкретный чат/канал/ветку.
+Слушает выбранный чат в MAX и пересылает новые сообщения в Telegram через
+Bot API: текст — как обычное сообщение (имя отправителя жирным, текст
+цитатой), медиа (фото/видео/файлы/голосовые/кружки/стикеры) — соответствующим
+методом (sendPhoto/sendVideo/sendDocument/sendVoice/sendVideoNote/sendSticker),
+подпись оформлена так же (имя + цитата).
 
 Настройка (после .loadmod):
   .config MaxToTgForwarder source_chat_id  <ID чата MAX>
   .config MaxToTgForwarder bot_token       <токен от @BotFather>
   .config MaxToTgForwarder target_chat_id  <ID чата Telegram>
   .config MaxToTgForwarder thread_id       <ID ветки, необязательно>
+  .config MaxToTgForwarder proxy_url       <http://user:pass@ip:port или
+                                             socks5://user:pass@ip:port, если
+                                             Telegram недоступен напрямую>
 
 Как узнать ID:
-  - ID чата MAX: команда .id, отправленная в нужном чате (модуль Messages).
-  - chat_id Telegram: перешлите любое сообщение из нужного чата боту
-    @RawDataBot / @userinfobot, там будет "chat":{"id": ...}. Для супергрупп
-    и каналов id обычно отрицательный и начинается с -100.
-  - thread_id (ID топика в форум-группе): правый клик по сообщению в топике
-    в Telegram → Copy Message Link, число после "/c/.../<chat>/<thread_id>/...".
+  - ID чата MAX: команда .id, отправленная в нужном чате.
+  - chat_id Telegram: перешлите сообщение из нужного чата боту @RawDataBot.
+  - thread_id: ID топика форум-группы (см. .tgfwdinfo / ссылку на сообщение
+    в теме).
 
 Команды:
-  .tgfwd      — включить/выключить пересылку
-  .tgfwdtest  — отправить тестовое сообщение в Telegram
-  .tgfwdinfo  — показать текущие настройки
+  .tgfwd        — включить/выключить пересылку
+  .tgfwdtest    — тестовое сообщение в Telegram
+  .tgfwdinfo    — текущие настройки
+
+Важные оговорки:
+  - Точная структура вложений во внутреннем API MAX (через PyMax) нигде
+    официально не задокументирована для всех типов, поэтому определение
+    типа вложения (фото/видео/голос/кружок/стикер) сделано эвристически,
+    по названию класса/поля type. Если для какого-то типа вложения
+    пересылка не сработает — в логах Maxli будет запись с repr() объекта
+    вложения, это поможет донастроить сопоставление.
+  - Видео-стикеры и анимации Telegram не всегда можно переслать как
+    sendSticker — в этом случае модуль автоматически пробует переслать
+    как документ.
 """
 
 import asyncio
@@ -38,11 +53,10 @@ from maxli import loader, utils
 
 logger = logging.getLogger(__name__)
 
-TELEGRAM_API_URL = "https://api.telegram.org/bot{token}/sendMessage"
+TELEGRAM_API_BASE = "https://api.telegram.org/bot{token}/{method}"
 
 # Для socks5-прокси нужен пакет aiohttp_socks (pip install aiohttp_socks).
-# Если его нет — просто останется недоступна поддержка socks5, http(s)-прокси
-# работает и без него через встроенный параметр aiohttp `proxy=`.
+# http(s)-прокси работает и без него, через параметр aiohttp `proxy=`.
 try:
     from aiohttp_socks import ProxyConnector
 
@@ -51,9 +65,20 @@ except ImportError:
     _HAS_SOCKS = False
 
 
+MEDIA_METHOD_MAP = {
+    "photo": ("sendPhoto", "photo"),
+    "video": ("sendVideo", "video"),
+    "video_note": ("sendVideoNote", "video_note"),
+    "voice": ("sendVoice", "voice"),
+    "audio": ("sendAudio", "audio"),
+    "sticker": ("sendSticker", "sticker"),
+    "document": ("sendDocument", "document"),
+}
+
+
 @loader.tds
 class MaxToTgForwarderMod(loader.Module):
-    """Пересылает сообщения из выбранного чата MAX в Telegram через Bot API"""
+    """Пересылает сообщения (текст и медиа) из чата MAX в Telegram через Bot API"""
 
     strings = {"name": "MaxToTgForwarder"}
 
@@ -94,9 +119,10 @@ class MaxToTgForwarderMod(loader.Module):
             ),
             loader.ConfigValue(
                 "template",
-                "📨 <b>{sender}</b>\n{text}",
+                "<b>{sender}</b>\n{text}",
                 lambda: (
-                    "Шаблон пересылаемого сообщения. Доступны {sender} и {text}. "
+                    "Шаблон текстового сообщения/подписи к медиа. Доступны "
+                    "{sender} и {text} (текст уже обёрнут в <blockquote>). "
                     "Поддерживается HTML-разметка Telegram"
                 ),
                 validator=loader.validators.String(),
@@ -108,20 +134,28 @@ class MaxToTgForwarderMod(loader.Module):
                 validator=loader.validators.Boolean(),
             ),
             loader.ConfigValue(
+                "forward_media",
+                True,
+                lambda: (
+                    "Пересылать медиа (фото, видео, кружки, голосовые, стикеры, "
+                    "файлы), а не только текст"
+                ),
+                validator=loader.validators.Boolean(),
+            ),
+            loader.ConfigValue(
                 "proxy_url",
                 "",
                 lambda: (
-                    "Прокси для доступа к Telegram API, если он заблокирован напрямую "
-                    "(если Telegram недоступен с этого сервера/телефона). "
-                    "Примеры: http://127.0.0.1:8080, "
-                    "socks5://user:pass@1.2.3.4:1080 (нужен пакет aiohttp_socks). "
+                    "Прокси для доступа к Telegram API, если он заблокирован "
+                    "напрямую. Примеры: http://user:pass@ip:port, "
+                    "socks5://user:pass@ip:port (нужен пакет aiohttp_socks). "
                     "Оставить пустым, если прямое подключение работает"
                 ),
                 validator=loader.validators.String(),
             ),
             loader.ConfigValue(
                 "timeout",
-                20,
+                30,
                 lambda: "Таймаут запроса к Telegram API в секундах",
                 validator=loader.validators.Integer(),
             ),
@@ -132,46 +166,65 @@ class MaxToTgForwarderMod(loader.Module):
                 validator=loader.validators.Integer(),
             ),
         )
-        self._session: aiohttp.ClientSession | None = None
-        self._session_proxy_url: str | None = None
 
-    async def _make_session(self) -> aiohttp.ClientSession:
+        self._download_session: aiohttp.ClientSession | None = None
+        self._tg_session: aiohttp.ClientSession | None = None
+        self._tg_session_proxy: str | None = None
+
+    # ------------------------------------------------------------------ #
+    # Жизненный цикл
+    # ------------------------------------------------------------------ #
+
+    async def client_ready(self):
+        self._download_session = aiohttp.ClientSession()
+
+    async def on_unload(self):
+        for session in (self._download_session, self._tg_session):
+            if session and not session.closed:
+                await session.close()
+
+    # ------------------------------------------------------------------ #
+    # Сессии/прокси
+    # ------------------------------------------------------------------ #
+
+    async def _get_download_session(self) -> aiohttp.ClientSession:
+        # Загрузка вложений из MAX всегда идёт напрямую, без прокси,
+        # заданного для Telegram.
+        if self._download_session is None or self._download_session.closed:
+            self._download_session = aiohttp.ClientSession()
+        return self._download_session
+
+    async def _get_telegram_session(self) -> aiohttp.ClientSession:
         proxy_url = self.config["proxy_url"].strip()
 
-        if proxy_url.startswith("socks5://") or proxy_url.startswith("socks4://"):
+        if proxy_url.startswith("socks4://") or proxy_url.startswith("socks5://"):
             if not _HAS_SOCKS:
                 logger.error(
                     "MaxToTgForwarder: указан socks-прокси, но пакет aiohttp_socks "
-                    "не установлен. Выполните: pip install aiohttp_socks"
+                    "не установлен (pip install aiohttp_socks). Иду напрямую."
                 )
-                return aiohttp.ClientSession()
-            connector = ProxyConnector.from_url(proxy_url)
-            return aiohttp.ClientSession(connector=connector)
+                return await self._get_download_session()
 
-        # http(s)-прокси не требует отдельного коннектора, передаётся в post(proxy=...)
-        return aiohttp.ClientSession()
+            needs_new = (
+                self._tg_session is None
+                or self._tg_session.closed
+                or proxy_url != self._tg_session_proxy
+            )
+            if needs_new:
+                if self._tg_session and not self._tg_session.closed:
+                    await self._tg_session.close()
+                connector = ProxyConnector.from_url(proxy_url)
+                self._tg_session = aiohttp.ClientSession(connector=connector)
+                self._tg_session_proxy = proxy_url
+            return self._tg_session
 
-    async def _get_session(self) -> aiohttp.ClientSession:
-        proxy_url = self.config["proxy_url"].strip()
-        needs_new = (
-            self._session is None
-            or self._session.closed
-            or proxy_url != self._session_proxy_url
-        )
-        if needs_new:
-            if self._session and not self._session.closed:
-                await self._session.close()
-            self._session = await self._make_session()
-            self._session_proxy_url = proxy_url
-        return self._session
+        # http(s)-прокси или отсутствие прокси — используем обычную сессию,
+        # прокси передаётся через параметр `proxy=` в самом запросе.
+        return await self._get_download_session()
 
-    async def client_ready(self):
-        self._session = await self._make_session()
-        self._session_proxy_url = self.config["proxy_url"].strip()
-
-    async def on_unload(self):
-        if self._session and not self._session.closed:
-            await self._session.close()
+    # ------------------------------------------------------------------ #
+    # Вспомогательное
+    # ------------------------------------------------------------------ #
 
     @staticmethod
     def _escape_html(text: str) -> str:
@@ -181,57 +234,131 @@ class MaxToTgForwarderMod(loader.Module):
             .replace(">", "&gt;")
         )
 
-    async def _send_to_telegram(self, text: str):
+    def _format_text(self, sender: str, text: str, limit: int = 900) -> str:
+        if text and len(text) > limit:
+            text = text[:limit].rstrip() + "…"
+        body = self._escape_html(text) if text else ""
+        wrapped = f"<blockquote>{body}</blockquote>" if body else ""
+        return self.config["template"].format(sender=sender, text=wrapped)
+
+    @staticmethod
+    def _classify_attachment(att) -> str:
+        type_val = getattr(att, "type", None)
+        type_name = str(getattr(type_val, "value", type_val) or "").upper()
+        cls_name = att.__class__.__name__.upper()
+        combined = f"{type_name} {cls_name}"
+
+        if "STICKER" in combined:
+            return "sticker"
+        if "VIDEO" in combined and any(
+            k in combined for k in ("NOTE", "ROUND", "CIRCLE")
+        ):
+            return "video_note"
+        if "VOICE" in combined:
+            return "voice"
+        if "VIDEO" in combined:
+            return "video"
+        if "PHOTO" in combined or "IMAGE" in combined:
+            return "photo"
+        if "AUDIO" in combined:
+            return "audio"
+        if "FILE" in combined or "DOCUMENT" in combined:
+            return "document"
+        return "document"
+
+    @staticmethod
+    def _extract_attachment_url(att):
+        candidates = []
+
+        for attr in ("url", "base_url", "src", "link", "photo_url", "video_url"):
+            val = getattr(att, attr, None)
+            if val:
+                candidates.append(val)
+
+        payload = getattr(att, "payload", None)
+        if payload is not None:
+            for attr in ("url", "base_url", "src"):
+                val = getattr(payload, attr, None)
+                if val:
+                    candidates.append(val)
+
+        elements = getattr(att, "elements", None) or []
+        for el in elements:
+            val = getattr(el, "url", None)
+            if val:
+                candidates.append(val)
+
+        sizes = getattr(att, "sizes", None) or getattr(att, "photo_sizes", None)
+        if sizes:
+            try:
+                biggest = sizes[-1]
+                val = getattr(biggest, "url", None)
+                if val:
+                    candidates.append(val)
+            except (IndexError, TypeError):
+                pass
+
+        return candidates[0] if candidates else None
+
+    # ------------------------------------------------------------------ #
+    # Telegram API
+    # ------------------------------------------------------------------ #
+
+    async def _tg_call(self, method: str, data: dict, files: dict | None = None):
         token = self.config["bot_token"]
-        chat_id = self.config["target_chat_id"]
+        if not token:
+            return False, "не настроен bot_token (см. .tgfwdinfo)"
 
-        if not token or not chat_id:
-            msg = "не настроен bot_token или target_chat_id (см. .tgfwdinfo)"
-            logger.warning("MaxToTgForwarder: %s", msg)
-            return False, msg
+        if not self.config["target_chat_id"]:
+            return False, "не настроен target_chat_id (см. .tgfwdinfo)"
 
-        payload = {
-            "chat_id": chat_id,
-            "text": text,
-            "parse_mode": "HTML",
-            "disable_web_page_preview": True,
-        }
-
-        thread_id = self.config["thread_id"]
-        if thread_id:
-            payload["message_thread_id"] = thread_id
-
-        url = TELEGRAM_API_URL.format(token=token)
-        timeout = aiohttp.ClientTimeout(total=self.config["timeout"] or 20)
+        url = TELEGRAM_API_BASE.format(token=token, method=method)
+        timeout = aiohttp.ClientTimeout(total=self.config["timeout"] or 30)
 
         proxy_url = self.config["proxy_url"].strip()
-        # http(s)-прокси передаём напрямую в post(); socks5 уже "зашит" в коннекторе сессии
         http_proxy = proxy_url if proxy_url.startswith("http") else None
 
         retries = max(0, self.config["retries"])
         last_error = "неизвестная ошибка"
 
+        clean_data = {k: v for k, v in data.items() if v is not None}
+
         for attempt in range(retries + 1):
             try:
-                session = await self._get_session()
-                async with session.post(
-                    url,
-                    json=payload,
-                    timeout=timeout,
-                    proxy=http_proxy,
-                ) as resp:
-                    data = await resp.json(content_type=None)
-                    if resp.status != 200 or not data.get("ok"):
-                        error = data.get("description", str(data))
-                        logger.error("MaxToTgForwarder: ошибка Telegram API: %s", error)
+                session = await self._get_telegram_session()
+
+                if files:
+                    form = aiohttp.FormData()
+                    for key, value in clean_data.items():
+                        form.add_field(key, str(value))
+                    for field_name, (filename, content, content_type) in files.items():
+                        form.add_field(
+                            field_name,
+                            content,
+                            filename=filename,
+                            content_type=content_type,
+                        )
+                    request_ctx = session.post(
+                        url, data=form, timeout=timeout, proxy=http_proxy
+                    )
+                else:
+                    request_ctx = session.post(
+                        url, json=clean_data, timeout=timeout, proxy=http_proxy
+                    )
+
+                async with request_ctx as resp:
+                    result = await resp.json(content_type=None)
+                    if not result.get("ok"):
+                        error = result.get("description", str(result))
                         return False, error
                     return True, None
 
             except (asyncio.TimeoutError, TimeoutError):
                 last_error = (
                     "не удалось подключиться к api.telegram.org (таймаут). "
-                    "Возможно, Telegram заблокирован в этой сети — задайте proxy_url "
-                    "(.config MaxToTgForwarder proxy_url http://... или socks5://...)"
+                    "Возможно, Telegram заблокирован в этой сети — задайте "
+                    "proxy_url (.config MaxToTgForwarder proxy_url http://... "
+                    "или socks5://...)"
                 )
             except aiohttp.ClientConnectorError as exc:
                 last_error = (
@@ -239,15 +366,118 @@ class MaxToTgForwarderMod(loader.Module):
                     "Проверьте интернет/DNS или задайте proxy_url"
                 )
             except Exception as exc:  # noqa: BLE001
-                logger.exception("MaxToTgForwarder: исключение при отправке в Telegram")
+                logger.exception("MaxToTgForwarder: исключение при обращении к Telegram")
                 last_error = str(exc)
-                break  # неизвестная ошибка — повторять смысла нет
+                break
 
             if attempt < retries:
                 await asyncio.sleep(1.5 * (attempt + 1))
 
         logger.error("MaxToTgForwarder: %s", last_error)
         return False, last_error
+
+    async def _send_text_message(self, html_text: str):
+        payload = {
+            "chat_id": self.config["target_chat_id"],
+            "text": html_text,
+            "parse_mode": "HTML",
+            "disable_web_page_preview": True,
+        }
+        thread_id = self.config["thread_id"]
+        if thread_id:
+            payload["message_thread_id"] = thread_id
+        return await self._tg_call("sendMessage", payload)
+
+    async def _download(self, url: str):
+        session = await self._get_download_session()
+        timeout = aiohttp.ClientTimeout(total=60)
+        async with session.get(url, timeout=timeout) as resp:
+            resp.raise_for_status()
+            data = await resp.read()
+            content_type = resp.headers.get("Content-Type", "")
+            return data, content_type
+
+    # ------------------------------------------------------------------ #
+    # Пересылка вложений
+    # ------------------------------------------------------------------ #
+
+    async def _forward_attachment(self, att, sender: str, text: str):
+        kind = self._classify_attachment(att)
+        url = self._extract_attachment_url(att)
+        caption = self._format_text(sender, text, limit=900) if text else f"<b>{sender}</b>"
+
+        if not url:
+            logger.warning(
+                "MaxToTgForwarder: не удалось получить URL вложения (%s): %r",
+                kind,
+                att,
+            )
+            note = (
+                f"{caption}\n\n📎 <i>вложение ({self._escape_html(kind)}), "
+                "не удалось получить ссылку на файл</i>"
+            )
+            await self._send_text_message(note)
+            return
+
+        try:
+            data, content_type = await self._download(url)
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("MaxToTgForwarder: ошибка загрузки вложения %s", url)
+            note = (
+                f"{caption}\n\n📎 <i>не удалось загрузить вложение: "
+                f"{self._escape_html(str(exc))}</i>"
+            )
+            await self._send_text_message(note)
+            return
+
+        filename = url.split("/")[-1].split("?")[0] or f"{kind}.bin"
+        method, field = MEDIA_METHOD_MAP.get(kind, ("sendDocument", "document"))
+
+        payload = {"chat_id": self.config["target_chat_id"]}
+        thread_id = self.config["thread_id"]
+        if thread_id:
+            payload["message_thread_id"] = thread_id
+
+        # sendVideoNote в Bot API не поддерживает caption
+        if method != "sendVideoNote":
+            payload["caption"] = caption
+            payload["parse_mode"] = "HTML"
+
+        files = {field: (filename, data, content_type or "application/octet-stream")}
+
+        ok, error = await self._tg_call(method, payload, files=files)
+
+        if not ok and method == "sendSticker":
+            logger.warning(
+                "MaxToTgForwarder: sendSticker не удался (%s), пробую как документ",
+                error,
+            )
+            fallback_payload = {
+                "chat_id": self.config["target_chat_id"],
+                "caption": caption,
+                "parse_mode": "HTML",
+            }
+            if thread_id:
+                fallback_payload["message_thread_id"] = thread_id
+            ok, error = await self._tg_call(
+                "sendDocument",
+                fallback_payload,
+                files={"document": (filename, data, content_type or "application/octet-stream")},
+            )
+
+        if not ok:
+            logger.error(
+                "MaxToTgForwarder: не удалось переслать вложение (%s): %s", kind, error
+            )
+            note = (
+                f"{caption}\n\n📎 <i>не удалось переслать вложение "
+                f"({self._escape_html(kind)}): {self._escape_html(str(error))}</i>"
+            )
+            await self._send_text_message(note)
+
+    # ------------------------------------------------------------------ #
+    # Watcher
+    # ------------------------------------------------------------------ #
 
     @loader.watcher("no_commands", "in")
     async def watcher(self, message):
@@ -267,24 +497,39 @@ class MaxToTgForwarderMod(loader.Module):
             return
 
         text = message.text or ""
-        attaches = getattr(message, "attaches", None) or getattr(message, "attachments", None)
+        attaches = (
+            getattr(message, "attaches", None)
+            or getattr(message, "attachments", None)
+            or []
+        )
 
         if not text and not attaches:
             return
 
-        sender = getattr(message, "sender", None) or "MAX"
-        sender = self._escape_html(str(sender))
+        sender = self._escape_html(str(getattr(message, "sender", None) or "MAX"))
 
-        body = self._escape_html(text) if text else "<i>[сообщение без текста]</i>"
+        if attaches and self.config["forward_media"]:
+            for att in attaches:
+                try:
+                    await self._forward_attachment(att, sender, text)
+                except Exception:  # noqa: BLE001
+                    logger.exception(
+                        "MaxToTgForwarder: необработанная ошибка при пересылке вложения: %r",
+                        att,
+                    )
+            return
 
-        if attaches:
-            body += "\n\n📎 <i>в сообщении есть вложение (файл/фото/стикер), оно не пересылается</i>"
+        if attaches and not self.config["forward_media"]:
+            text = text or "[вложение, пересылка медиа выключена]"
 
-        formatted = self.config["template"].format(sender=sender, text=body)
-
-        ok, error = await self._send_to_telegram(formatted)
+        formatted = self._format_text(sender, text, limit=3500)
+        ok, error = await self._send_text_message(formatted)
         if not ok:
             logger.error("MaxToTgForwarder: не удалось переслать сообщение: %s", error)
+
+    # ------------------------------------------------------------------ #
+    # Команды
+    # ------------------------------------------------------------------ #
 
     @loader.command(alias="tgfwd")
     async def tgfwdcmd(self, message):
@@ -296,8 +541,8 @@ class MaxToTgForwarderMod(loader.Module):
     @loader.command(alias="tgfwdtest")
     async def tgfwdtestcmd(self, message):
         """— отправить тестовое сообщение в Telegram"""
-        ok, error = await self._send_to_telegram(
-            "✅ Тестовое сообщение от Maxli (MaxToTgForwarder)"
+        ok, error = await self._send_text_message(
+            "<b>MaxToTgForwarder</b>\n<blockquote>✅ Тестовое сообщение</blockquote>"
         )
         if ok:
             await utils.answer(message, "✅ Тестовое сообщение успешно отправлено в Telegram")
@@ -310,6 +555,7 @@ class MaxToTgForwarderMod(loader.Module):
         cfg = self.config
         info = (
             f"статус: {'включена' if cfg['enabled'] else 'выключена'}\n"
+            f"медиа: {'да' if cfg['forward_media'] else 'нет, только текст'}\n"
             f"чат MAX (source_chat_id): {cfg['source_chat_id'] or 'не задан'}\n"
             f"чат Telegram (target_chat_id): {cfg['target_chat_id'] or 'не задан'}\n"
             f"ветка (thread_id): {cfg['thread_id'] or 'нет'}\n"
@@ -320,4 +566,4 @@ class MaxToTgForwarderMod(loader.Module):
         await utils.answer(
             message,
             "🔀 **MaxToTgForwarder**\n" + utils.quote(info),
-        )
+          )
