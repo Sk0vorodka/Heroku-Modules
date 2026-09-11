@@ -125,9 +125,21 @@ class MaxToTgForwarderMod(loader.Module):
                 0,
                 lambda: (
                     "ID ветки (топика) в Telegram для сообщений, содержащих "
-                    "РОВНО одну фотографию и больше ничего (ни текста-вложений, "
-                    "ни доп. фото/видео/файлов). Всё остальное идёт в обычную "
-                    "ветку thread_id. 0 — не выделять такие сообщения отдельно"
+                    "РОВНО одну фотографию и больше ничего (ни доп. фото/видео/"
+                    "файлов, ни сколько-нибудь значимого текста — см. "
+                    "single_photo_max_text_length). Всё остальное идёт в "
+                    "обычную ветку thread_id. 0 — не выделять такие сообщения"
+                ),
+                validator=loader.validators.Integer(),
+            ),
+            loader.ConfigValue(
+                "single_photo_max_text_length",
+                0,
+                lambda: (
+                    "Сколько символов текста ещё считается 'просто фото' для "
+                    "single_photo_thread_id. 0 — фото должно быть совсем без "
+                    "подписи/текста, иначе (например, длинное описание "
+                    "мероприятия под фото) сообщение уйдёт в обычную ветку thread_id"
                 ),
                 validator=loader.validators.Integer(),
             ),
@@ -303,15 +315,18 @@ class MaxToTgForwarderMod(loader.Module):
             return "document"
         return "document"
 
-    def _pick_thread_id(self, attaches) -> int:
-        """Ровно одно фото и больше ничего -> single_photo_thread_id.
-        Всё остальное (без фото, несколько вложений, видео/файлы/гс и т.д.)
-        -> обычный thread_id."""
+    def _pick_thread_id(self, attaches, text: str = "") -> int:
+        """Ровно одно фото, без (значимого) текста -> single_photo_thread_id.
+        Всё остальное (без фото, несколько вложений, фото с текстом длиннее
+        порога, видео/файлы/гс и т.д.) -> обычный thread_id."""
         single_photo_thread = self.config["single_photo_thread_id"]
+        max_text_len = self.config["single_photo_max_text_length"]
 
         if single_photo_thread and len(attaches) == 1:
             if self._classify_attachment(attaches[0]) == "photo":
-                return single_photo_thread
+                text_len = len((text or "").strip())
+                if text_len <= max_text_len:
+                    return single_photo_thread
 
         return self.config["thread_id"]
 
@@ -769,7 +784,7 @@ class MaxToTgForwarderMod(loader.Module):
 
         sender = self._escape_html(sender_name)
 
-        thread_id = self._pick_thread_id(attaches)
+        thread_id = self._pick_thread_id(attaches, text)
 
         if attaches and self.config["forward_media"]:
             for att in attaches:
@@ -894,6 +909,8 @@ class MaxToTgForwarderMod(loader.Module):
             f"ветка (thread_id): {cfg['thread_id'] or 'нет'}\n"
             f"ветка для одиночных фото (single_photo_thread_id): "
             f"{cfg['single_photo_thread_id'] or 'не задана'}\n"
+            f"порог текста для 'просто фото' (single_photo_max_text_length): "
+            f"{cfg['single_photo_max_text_length']} символов\n"
             f"токен бота: {'задан' if cfg['bot_token'] else 'не задан'}\n"
             f"прокси: {cfg['proxy_url'] or 'не используется'}\n"
             f"таймаут: {cfg['timeout']}с, повторов: {cfg['retries']}"
@@ -901,4 +918,4 @@ class MaxToTgForwarderMod(loader.Module):
         await utils.answer(
             message,
             "🔀 **MaxToTgForwarder**\n" + utils.quote(info),
-          )
+        )
