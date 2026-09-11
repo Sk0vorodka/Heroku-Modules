@@ -809,14 +809,14 @@ class MaxToTgForwarderMod(loader.Module):
     # Команды
     # ------------------------------------------------------------------ #
 
-    @loader.command(alias="tgfwd")
+    @loader.command()
     async def tgfwdcmd(self, message):
         """— включить/выключить пересылку MAX → Telegram"""
         self.config["enabled"] = not self.config["enabled"]
         state = "включена ✅" if self.config["enabled"] else "выключена ❌"
         await utils.answer(message, f"🔀 Пересылка в Telegram {state}")
 
-    @loader.command(alias="tgfwdtest")
+    @loader.command()
     async def tgfwdtestcmd(self, message):
         """— отправить тестовое сообщение в Telegram"""
         ok, error = await self._send_text_message(
@@ -827,7 +827,7 @@ class MaxToTgForwarderMod(loader.Module):
         else:
             await utils.answer(message, f"❌ Не удалось отправить: {error}")
 
-    @loader.command(alias="tgfwddebug")
+    @loader.command()
     async def tgfwddebugcmd(self, message):
         """— (отладка) дамп полей sender и вложений сообщения (используй в ответ на сообщение с кружком/гс/стикером)"""
         target = message
@@ -897,7 +897,7 @@ class MaxToTgForwarderMod(loader.Module):
             "🔧 **MaxToTgForwarder debug**\n" + utils.quote(full_text),
         )
 
-    @loader.command(alias="tgfwdinfo")
+    @loader.command()
     async def tgfwdinfocmd(self, message):
         """— показать текущие настройки пересылки"""
         cfg = self.config
